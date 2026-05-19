@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+*.pyc
+_pdf_cache/
+run.log
+congress-trades-token.json
+congress-trades-oauth.json
+.env
