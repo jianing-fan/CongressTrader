@@ -88,6 +88,8 @@ python3 congress_trader.py
 
 The script will scrape available disclosure data, create a dated Google Sheet, and print the resulting sheet URL.
 
+A typical run takes about 8 minutes. The slowest step is the sector and industry enrichment pass, because the script looks up metadata for each unique stock ticker through Yahoo Finance.
+
 ## Optional Automation
 
 The script can be scheduled with cron. For example, to run every Monday at 9:00 PM:

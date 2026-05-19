@@ -1,5 +1,5 @@
 """
-Congressional Stock Trade Scraper — Full Buys & Sales (2025-2026)
+Congressional Stock Trade Scraper — Full Buys & Sales (2025+)
 
 Sources:
   1. House Clerk PTR filings   (disclosures-clerk.house.gov)  ← always available
@@ -51,13 +51,26 @@ HOUSE_BASE  = "https://disclosures-clerk.house.gov"
 SENATE_BASE = "https://efts.senate.gov"
 CT_API      = "https://api.capitoltrades.com"
 
-YEARS            = [2025, 2026]
 START_DATE       = datetime(2025, 1, 1)
 NEW_ON_WEEK_START = datetime(2026, 3, 31)
 OAUTH_CREDENTIALS_FILE = os.path.join(SCRIPT_DIR, "congress-trades-oauth.json")
 OAUTH_TOKEN_FILE       = os.path.join(SCRIPT_DIR, "congress-trades-token.json")
 MAX_WORKERS = 12
 YAHOO_DELAY = 0.15
+ASSET_NAME_REVIEW_LIMIT = 50
+
+# Tickers can change after a disclosure is filed. Keep the disclosed ticker in
+# report rows, but use the current Yahoo symbol for metadata lookup.
+TICKER_ALIASES = {
+    "FI": "FISV",     # Fiserv changed from FI back to FISV in November 2025
+    "BRK.B": "BRK-B", # Yahoo uses hyphenated Berkshire class B ticker
+}
+
+# Yahoo sometimes recognizes a current symbol but omits sector metadata.
+TICKER_INFO_OVERRIDES = {
+    "FI": {"sector": "Technology", "industry": "Information Technology Services"},
+    "FISV": {"sector": "Technology", "industry": "Information Technology Services"},
+}
 
 OWNER_LABELS = {
     "SP": "Spouse", "ME": "Member", "JT": "Joint",
@@ -150,6 +163,72 @@ def parse_amount(flat_text):
     mid = (nums[0] + nums[-1]) // 2 if len(nums) >= 2 else 0
     return raw, mid
 
+
+def clean_asset_name(asset_raw):
+    """Clean House PDF asset text and trim bleed-over from prior non-stock rows."""
+    # Keep newlines for structure while removing null bytes and other control chars.
+    raw = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]", "", asset_raw)
+
+    # Page breaks can inject a transaction row plus the table header into the
+    # middle of a wrapped asset name, e.g. "Representing one S 10/30/...
+    # ID Owner Asset ... common share". Remove that scaffold and keep the
+    # asset-name text on both sides.
+    raw = re.sub(
+        r"(?<=[A-Za-z])\s*[EPS]\s+\d{2}/\d{2}/\d{4}\s*\d{2}/\d{2}/\d{4}\s*"
+        r"\$[\d,]+(?:\s*-\s*(?:\$[\d,]+)?)?\s*"
+        r"(?:Filing\s+ID\s+#\d+\s*)?"
+        r"ID\s+Owner\s+Asset\s+Transaction\s+Type\s+Date\s+Notification\s+Date\s+"
+        r"Amount\s+Cap\.\s+Gains\s+>\s*\$200\?\s*",
+        " ",
+        raw,
+        flags=re.DOTALL,
+    )
+
+    # Some House PDFs omit the owner code on a stock row that follows an [OT]
+    # exchange row. In that case the parser sees one large block, so keep only
+    # the trailing asset-name lines before the ticker.
+    has_prior_tag = re.search(r"\[[A-Z]{2}\]", raw)
+    has_prior_transaction = re.search(r"\b[EPS]\s+\d{2}/\d{2}/\d{4}", raw)
+    if has_prior_tag and has_prior_transaction:
+        trailing_lines = []
+        for line in reversed([ln.strip() for ln in raw.splitlines()]):
+            if not line:
+                continue
+            if trailing_lines and line.endswith("."):
+                break
+            if re.search(r"\$[\d,]+", line) or re.match(r"^[EPS]\s+\d{2}/\d{2}/\d{4}", line):
+                if trailing_lines:
+                    break
+                continue
+            if re.match(r"^(?:F\s*S|S\s*O|D|L)\s*:", line) or line.startswith(("Filing ID", "ID Owner")):
+                if trailing_lines:
+                    break
+                continue
+            if trailing_lines and re.search(r"\[[A-Z]{2}\]", line):
+                break
+            trailing_lines.append(line)
+        if trailing_lines:
+            raw = "\n".join(reversed(trailing_lines))
+
+    cleaned = re.sub(r"\s+", " ", raw).strip().rstrip(",")
+    if len(cleaned) > ASSET_NAME_REVIEW_LIMIT:
+        cleaned = re.sub(
+            r"\s+(?:F\s*S:\s*New|S\s*O:|D:|L:)\s+.*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip().rstrip(",")
+        cleaned = re.sub(
+            r"\s+[EPS]\s+\d{2}/\d{2}/\d{4}\s*\d{2}/\d{2}/\d{4}\s*"
+            r"\$[\d,]+(?:\s*-\s*(?:\$[\d,]+)?)?\s*.*?"
+            r"(?:ID Owner Asset Transaction Type Date Notification Date Amount Cap\. Gains > \$200\?|Filing ID #\d+)\s*",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(",")
+    return cleaned
+
 # ── House Clerk ───────────────────────────────────────────────────────────────
 
 def house_filing_urls(year):
@@ -226,8 +305,7 @@ def parse_pdf(member, pdf_bytes, year, source="House"):
             asset_raw = rest[:ticker_before_tag.start()]
         else:
             asset_raw = rest.split(f"({ticker})")[0]
-        asset_raw = re.sub(r"[\x00-\x08\x0b-\x1f]", "", asset_raw)  # strip null bytes
-        asset = re.sub(r"\s+", " ", asset_raw).strip().rstrip(",")
+        asset = clean_asset_name(asset_raw)
 
         tm = re.search(r"\b(P|S)\s+(\d{2}/\d{2}/\d{4})", block)
         if not tm:
@@ -306,7 +384,7 @@ def capitol_trades_fetch(days_back=500):
                     tx_date = datetime.strptime(ds, "%Y-%m-%d")
                 except ValueError:
                     continue
-                if tx_date.year not in (2025, 2026):
+                if tx_date < START_DATE:
                     continue
                 amt = t.get("reportedAmount", {})
                 if isinstance(amt, dict):
@@ -339,14 +417,70 @@ def capitol_trades_fetch(days_back=500):
 
 _info_cache = {}   # ticker → {"sector": ..., "industry": ...}
 
+def _etf_sector_from_category(category):
+    if not category:
+        return "ETF/Fund"
+    category_norm = re.sub(r"\s+", " ", str(category)).strip()
+    lower = category_norm.lower()
+    if lower == "large blend":
+        return "Large Blend/Broad Market"
+
+    sector_map = [
+        ("technology", "Technology"),
+        ("energy", "Energy"),
+        ("financial", "Financial Services"),
+        ("health", "Healthcare"),
+        ("real estate", "Real Estate"),
+        ("utilities", "Utilities"),
+        ("consumer defensive", "Consumer Defensive"),
+        ("consumer cyclical", "Consumer Cyclical"),
+        ("communication", "Communication Services"),
+        ("industrial", "Industrials"),
+        ("materials", "Basic Materials"),
+        ("bond", "Bond/Fixed Income"),
+        ("government", "Bond/Fixed Income"),
+        ("municipal", "Bond/Fixed Income"),
+        ("digital assets", "Digital Assets"),
+    ]
+    for needle, sector in sector_map:
+        if needle in lower:
+            return sector
+    return category_norm
+
+def _looks_like_etf_or_fund(data):
+    quote_type = str(data.get("quoteType") or "").upper()
+    legal_type = str(data.get("legalType") or "").lower()
+    return (
+        quote_type in {"ETF", "MUTUALFUND"}
+        or "fund" in legal_type
+        or bool(data.get("category") or data.get("fundFamily"))
+    )
+
 def stock_info(ticker):
     if ticker in _info_cache:
         return _info_cache[ticker]
+    lookup_ticker = TICKER_ALIASES.get(ticker, ticker)
+    override = TICKER_INFO_OVERRIDES.get(ticker) or TICKER_INFO_OVERRIDES.get(lookup_ticker)
     info = {"sector": "Unknown", "industry": "Unknown"}
+    if override:
+        info.update(override)
+        _info_cache[ticker] = info
+        return info
     try:
-        data = yf.Ticker(ticker).info
-        info["sector"]   = data.get("sector")   or "Unknown"
-        info["industry"] = data.get("industry") or "Unknown"
+        data = yf.Ticker(lookup_ticker).info
+        sector = data.get("sector") or "Unknown"
+        industry = data.get("industry") or "Unknown"
+        if (sector == "Unknown" or industry == "Unknown") and _looks_like_etf_or_fund(data):
+            category = data.get("category")
+            fund_family = data.get("fundFamily")
+            etf_sector = _etf_sector_from_category(category)
+            sector = etf_sector if sector == "Unknown" else sector
+            industry_parts = [str(x).strip() for x in (category, fund_family) if x]
+            industry = " / ".join(industry_parts) if industry == "Unknown" and industry_parts else industry
+            if industry == "Unknown":
+                industry = "ETF/Fund"
+        info["sector"] = sector
+        info["industry"] = industry
     except Exception:
         pass
     _info_cache[ticker] = info
@@ -449,6 +583,14 @@ def build_all_trades_sheet(ws, trades, title, hdr_fill, even_fill, odd_fill):
 
     freeze_and_filter(ws)
 
+
+TOP50_RANK_NOTE = (
+    "Rank is by total estimated buy value for the company/ticker, "
+    "not by a single trade. Multiple rows can share the same rank when "
+    "they are trades for the same ranked company/ticker. This sheet is "
+    "sorted by per-trade midpoint amount descending, then by trade date "
+    "most recent first, then member."
+)
 
 TOP50_COLS = [
     ("Rank",           6),
@@ -768,9 +910,18 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
         data = [headers]
         # Carry forward rows from previous New On Week tab (only those on/after start date)
         filtered_carried = [
-            row for row in carried_rows
+            list(row) for row in carried_rows
             if row and len(row) > 2 and row[2] >= NEW_ON_WEEK_START.strftime("%Y-%m-%d")
         ]
+        current_asset_by_ticker = {
+            t["ticker"]: xl_safe(t["asset"])
+            for t in buys
+            if t["date"] >= NEW_ON_WEEK_START and t.get("asset")
+        }
+        for row in filtered_carried:
+            if len(row) > 1 and row[0] in current_asset_by_ticker:
+                if "[OT]" in row[1] or len(row[1]) > 120:
+                    row[1] = current_asset_by_ticker[row[0]]
         data.extend(filtered_carried)
         # Tickers already present — don't add duplicates
         seen = {row[0] for row in filtered_carried if row}
@@ -802,10 +953,165 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
     first_ws = spreadsheet.sheet1
     first_ws.update_title(tabs[0][0])
     first_ws.update(tabs[0][1])
+    worksheets = {tabs[0][0]: first_ws}
+
+    def add_cell_note(ws, row_idx, col_idx, note):
+        spreadsheet.batch_update({
+            "requests": [{
+                "updateCells": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": row_idx,
+                        "endRowIndex": row_idx + 1,
+                        "startColumnIndex": col_idx,
+                        "endColumnIndex": col_idx + 1,
+                    },
+                    "rows": [{"values": [{"note": note}]}],
+                    "fields": "note",
+                }
+            }]
+        })
+
+    def format_google_report():
+        header_color = {"red": 0.12, "green": 0.23, "blue": 0.40}
+        stripe_color = {"red": 0.93, "green": 0.96, "blue": 1.0}
+        white = {"red": 1.0, "green": 1.0, "blue": 1.0}
+        buy_blue = {"red": 0.0, "green": 0.28, "blue": 0.58}
+        sale_red = {"red": 0.70, "green": 0.12, "blue": 0.12}
+        requests = []
+        for tab_name, rows in tabs:
+            ws = worksheets[tab_name]
+            row_count = max(len(rows), 1)
+            col_count = max(len(rows[0]) if rows else 1, 1)
+            sheet_range = {
+                "sheetId": ws.id,
+                "startRowIndex": 0,
+                "endRowIndex": row_count,
+                "startColumnIndex": 0,
+                "endColumnIndex": col_count,
+            }
+            requests.extend([
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": ws.id,
+                            "gridProperties": {"frozenRowCount": 1},
+                        },
+                        "fields": "gridProperties.frozenRowCount",
+                    }
+                },
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": header_color,
+                                "horizontalAlignment": "CENTER",
+                                "verticalAlignment": "MIDDLE",
+                                "wrapStrategy": "WRAP",
+                                "textFormat": {
+                                    "bold": True,
+                                    "foregroundColor": white,
+                                },
+                            }
+                        },
+                        "fields": (
+                            "userEnteredFormat(backgroundColor,horizontalAlignment,"
+                            "verticalAlignment,wrapStrategy,textFormat)"
+                        ),
+                    }
+                },
+                {"setBasicFilter": {"filter": {"range": sheet_range}}},
+                {
+                    "addBanding": {
+                        "bandedRange": {
+                            "range": sheet_range,
+                            "rowProperties": {
+                                "headerColor": header_color,
+                                "firstBandColor": white,
+                                "secondBandColor": stripe_color,
+                            },
+                        }
+                    }
+                },
+                {
+                    "autoResizeDimensions": {
+                        "dimensions": {
+                            "sheetId": ws.id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 0,
+                            "endIndex": col_count,
+                        }
+                    }
+                },
+            ])
+            if "Trade Type" in rows[0]:
+                type_col = rows[0].index("Trade Type")
+                type_range = {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1,
+                    "endRowIndex": row_count,
+                    "startColumnIndex": type_col,
+                    "endColumnIndex": type_col + 1,
+                }
+                requests.extend([
+                    {
+                        "addConditionalFormatRule": {
+                            "rule": {
+                                "ranges": [type_range],
+                                "booleanRule": {
+                                    "condition": {
+                                        "type": "TEXT_EQ",
+                                        "values": [{"userEnteredValue": "Purchase"}],
+                                    },
+                                    "format": {
+                                        "textFormat": {
+                                            "foregroundColor": buy_blue,
+                                            "bold": True,
+                                        }
+                                    },
+                                },
+                            },
+                            "index": 0,
+                        }
+                    },
+                    {
+                        "addConditionalFormatRule": {
+                            "rule": {
+                                "ranges": [type_range],
+                                "booleanRule": {
+                                    "condition": {
+                                        "type": "TEXT_EQ",
+                                        "values": [{"userEnteredValue": "Sale"}],
+                                    },
+                                    "format": {
+                                        "textFormat": {
+                                            "foregroundColor": sale_red,
+                                            "bold": True,
+                                        }
+                                    },
+                                },
+                            },
+                            "index": 0,
+                        }
+                    },
+                ])
+        spreadsheet.batch_update({"requests": requests})
 
     for tab_name, rows in tabs[1:]:
         ws = spreadsheet.add_worksheet(title=tab_name, rows=max(len(rows) + 10, 100), cols=20)
         ws.update(rows)
+        worksheets[tab_name] = ws
+        if tab_name == "Top 50 Buys (Held 30d+)":
+            add_cell_note(ws, 0, 0, TOP50_RANK_NOTE)
+
+    format_google_report()
 
     # Move spreadsheet into the CongressTrader folder
     if folder_id:
@@ -859,9 +1165,11 @@ def main():
     run_date = datetime.today()
 
     all_trades = []
+    years = list(range(START_DATE.year, run_date.year + 1))
+    log(f"Collecting trades from {START_DATE.year} through {run_date.year}...")
 
     # ── 1. House Clerk ────────────────────────────────────────────────────────
-    for year in YEARS:
+    for year in years:
         log(f"\n[House] Fetching PTR index for {year}...")
         try:
             filings = house_filing_urls(year)
@@ -893,7 +1201,7 @@ def main():
 
     # ── 2. Senate eFTS ────────────────────────────────────────────────────────
     log("\n[Senate] Fetching PTR filings...")
-    for year in YEARS:
+    for year in years:
         try:
             filings = senate_filing_urls(year)
             log(f"[Senate] {len(filings)} PTR filings for {year}. Downloading PDFs...")
@@ -908,15 +1216,15 @@ def main():
             log(f"[Senate {year}] Unavailable: {e}")
 
     # ── 3. Capitol Trades ─────────────────────────────────────────────────────
-    log("\n[Capitol Trades] Fetching buy & sell trades (2025-2026)...")
+    log(f"\n[Capitol Trades] Fetching buy & sell trades ({START_DATE.year}+)...")
     try:
-        ct = capitol_trades_fetch(days_back=500)
+        ct = capitol_trades_fetch(days_back=(run_date - START_DATE).days + 31)
         all_trades.extend(ct)
         log(f"[Capitol Trades] {len(ct)} trades fetched.")
     except Exception as e:
         log(f"[Capitol Trades] Unavailable: {e}")
 
-    # ── 4. Deduplicate & filter to 2025-2026 ─────────────────────────────────
+    # ── 4. Deduplicate & filter to 2025+ ───────────────────────────────────
     all_trades = deduplicate(all_trades)
     all_trades = [t for t in all_trades if t["date"] >= START_DATE and t["ticker"]]
     buys  = [t for t in all_trades if t["type"] == "P" and t["midpoint"] > 0]
@@ -947,15 +1255,14 @@ def main():
     for tk in all_tickers:
         stock_info(tk)
 
-    # ── 7. Build top-50 rows (sorted sector → midpoint desc → member) ────────
+    # ── 7. Build top-50 rows (sorted midpoint desc → recent date → member) ───
     ticker_rank = {tk: i+1 for i, tk in enumerate(top50_tickers)}
     top50_rows = []
     for tk in top50_tickers:
         for p in held:
             if p["ticker"] == tk:
                 top50_rows.append(p)
-    info_key = lambda r: (_info_cache.get(r["ticker"], {}).get("sector", "Unknown"), -r["midpoint"], r["member"])
-    top50_rows.sort(key=info_key)
+    top50_rows.sort(key=lambda r: (-r["midpoint"], -r["date"].timestamp(), r["member"]))
 
     # ── 8. Build All Trades list (sorted by date desc) ────────────────────────
     all_sorted = sorted(all_trades, key=lambda t: t["date"], reverse=True)
