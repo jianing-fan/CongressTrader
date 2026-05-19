@@ -123,4 +123,4 @@ This is an early public release of a personal research automation script. It is 
 
 ## Disclaimer
 
-CongressTrader is provided for research and educational purposes only. Congressional disclosure data can contain reporting delays, amendments, formatting inconsistencies, and data quality issues. Verify important findings against the original disclosure documents.
+CongressTrader is provided for research and educational purposes only. Congressional disclosure data can contain reporting delays, amendments, formatting inconsistencies, and data quality issues. It is highly likely that congressmen choose not to disclose (and the penalty is small). Verify important findings against the original disclosure documents.
