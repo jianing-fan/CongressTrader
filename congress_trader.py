@@ -832,7 +832,7 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
 
     sheet_title = f"CongressTrader {run_date.strftime('%Y-%m-%d')}"
     log(f"\nCreating Google Sheet: {sheet_title}")
-    spreadsheet = gc.create(sheet_title)
+    spreadsheet = gc.create(sheet_title, folder_id=folder_id) if folder_id else gc.create(sheet_title)
 
     def trade_rows(trades):
         headers = [col for col, _ in ALL_COLS]
@@ -1123,15 +1123,8 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
 
     format_google_report()
 
-    # Move spreadsheet into the CongressTrader folder
     if folder_id:
-        drive.files().update(
-            fileId=spreadsheet.id,
-            addParents=folder_id,
-            removeParents="root",
-            fields="id, parents",
-        ).execute()
-        log(f"  Moved into Google Drive folder: CongressTrader")
+        log(f"  Created in Google Drive folder: CongressTrader")
     else:
         log(f"  Warning: folder 'CongressTrader' not found — sheet saved to Drive root")
 
@@ -1151,13 +1144,7 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
             log_sheet = gc.open_by_key(log_files[0]["id"])
             log_ws = log_sheet.sheet1
         else:
-            log_sheet = gc.create(log_title)
-            drive.files().update(
-                fileId=log_sheet.id,
-                addParents=folder_id,
-                removeParents="root",
-                fields="id, parents",
-            ).execute()
+            log_sheet = gc.create(log_title, folder_id=folder_id)
             log_ws = log_sheet.sheet1
             log_ws.update_title("Run Log")
         rows = [[f"=== Run {run_date.strftime('%Y-%m-%d %H:%M')} ==="]] + \
