@@ -2,8 +2,10 @@ name: Run CongressTrader
 
 on:
   schedule:
-    # GitHub cron uses UTC. This is Monday 9:15 PM in Toronto during daylight saving time.
-    - cron: "15 1 * * 2"
+    # GitHub cron uses UTC. These two entries cover 4 PM New York time
+    # across daylight saving time; the timezone check below skips the off-hour run.
+    - cron: "0 20 * * 1"
+    - cron: "0 21 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -15,16 +17,36 @@ jobs:
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
 
     steps:
+      - name: Check New York schedule time
+        id: schedule_check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ny_time=$(TZ=America/New_York date +%u-%H)
+          if [ "$ny_time" = "1-16" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping because current New York time is not Monday 4 PM."
+          fi
+
       - name: Check out repository
+        if: steps.schedule_check.outputs.should_run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.schedule_check.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
+        if: steps.schedule_check.outputs.should_run == 'true'
         run: pip install -r requirements.txt
 
       - name: Run CongressTrader
+        if: steps.schedule_check.outputs.should_run == 'true'
         run: python congress_trader.py
