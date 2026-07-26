@@ -30,6 +30,7 @@ from threading import Lock
 import gspread
 import yfinance as yf
 from google.oauth2.credentials import Credentials as OAuthCredentials
+from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build as google_build
@@ -792,6 +793,12 @@ def _get_credentials():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
+
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if service_account_json:
+        info = json.loads(service_account_json)
+        return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+
     creds = None
     if os.path.exists(OAUTH_TOKEN_FILE):
         creds = OAuthCredentials.from_authorized_user_file(OAUTH_TOKEN_FILE, scopes)
@@ -812,12 +819,15 @@ def write_to_google_sheets(all_sorted, buys_sorted, sells_sorted,
     gc = gspread.Client(auth=creds)
     drive = google_build("drive", "v3", credentials=creds)
 
-    # Find the CongressTrader folder and the previous sheet's tickers
-    folder_results = drive.files().list(
-        q="name='CongressTrader' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields="files(id)",
-    ).execute()
-    folder_id = (folder_results.get("files", []) or [{}])[0].get("id")
+    # Find the CongressTrader folder and the previous sheet's tickers.
+    # GitHub Actions can pass the folder ID as a secret to avoid relying on name search.
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        folder_results = drive.files().list(
+            q="name='CongressTrader' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(id)",
+        ).execute()
+        folder_id = (folder_results.get("files", []) or [{}])[0].get("id")
     carried_rows, prev_tickers = _previous_data(gc, drive, folder_id, run_date) if folder_id else ([], set())
 
     sheet_title = f"CongressTrader {run_date.strftime('%Y-%m-%d')}"
