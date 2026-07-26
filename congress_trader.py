@@ -794,6 +794,19 @@ def _get_credentials():
         "https://www.googleapis.com/auth/drive",
     ]
 
+    oauth_token_json = os.environ.get("GOOGLE_OAUTH_TOKEN_JSON")
+    if oauth_token_json:
+        creds = OAuthCredentials.from_authorized_user_info(json.loads(oauth_token_json), scopes)
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                raise RuntimeError(
+                    "GOOGLE_OAUTH_TOKEN_JSON is present but cannot be refreshed. "
+                    "Regenerate the local token and update the GitHub secret."
+                )
+        return creds
+
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if service_account_json:
         info = json.loads(service_account_json)
