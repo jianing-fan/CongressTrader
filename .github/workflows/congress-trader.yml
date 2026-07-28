@@ -25,12 +25,25 @@ jobs:
             exit 0
           fi
 
-          ny_time=$(TZ=America/New_York date +%u-%H)
-          if [ "$ny_time" = "1-16" ]; then
+          # GitHub scheduled workflows can start late. Use the intended cron entry,
+          # not the runner's current hour, and choose the entry matching NY's offset.
+          ny_offset=$(TZ=America/New_York date +%z)
+          schedule='${{ github.event.schedule }}'
+          is_dst_slot=false
+          is_standard_slot=false
+
+          if [ "$schedule" = "0 20 * * 1" ] && [ "$ny_offset" = "-0400" ]; then
+            is_dst_slot=true
+          fi
+          if [ "$schedule" = "0 21 * * 1" ] && [ "$ny_offset" = "-0500" ]; then
+            is_standard_slot=true
+          fi
+
+          if [ "$is_dst_slot" = "true" ] || [ "$is_standard_slot" = "true" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping because current New York time is not Monday 4 PM."
+            echo "Skipping because this UTC schedule is not the current 4 PM New York slot."
           fi
 
       - name: Check out repository
